@@ -1,172 +1,356 @@
-class KitchenSafeRuleEngine:
-    """
-    Converts detections from the three AI models into a KitchenSafe
-    safety state.
+from arduino.app_utils import App, Bridge
+from arduino.app_bricks.web_ui import WebUI
+from arduino.app_bricks.video_objectdetection import VideoObjectDetection
 
-    No IoU is used.
-    """
 
-    CONFIDENCE_THRESHOLD = 0.50
+# ============================================================
+# INITIALIZATION
+# ============================================================
 
-    def process(self, results):
-        """
-        Process the output from all three models.
+ui = WebUI()
+bridge = Bridge()
 
-        Returns a dictionary containing:
-            - detected conditions
-            - overall safety state
-            - reason
-        """
+detector = VideoObjectDetection(
+    confidence=0.30,
+    debounce_sec=0.0
+)
 
-        burner_detections = self._get_boxes(
-            results.get("burner", {})
+
+# ============================================================
+# SYSTEM STATE
+# ============================================================
+
+flame_detected = False
+burner_on = False
+cloth_detected = False
+
+
+# ============================================================
+# CLASS DEFINITIONS
+# ============================================================
+
+# Kitchen model:
+# Class 1 = Flame
+
+FLAME_CLASSES = {
+    "1",
+    "class_1",
+    "flame",
+    "fire"
+}
+
+
+# Cloth model:
+# Either of its two classes represents cloth.
+#
+# If your cloth model uses class 0 and class 1,
+# both are included here.
+
+CLOTH_CLASSES = {
+    "0",
+    "class_0",
+    "1",
+    "class_1",
+    "cloth",
+    "towel"
+}
+
+
+# Burner model
+
+BURNER_ON_CLASSES = {
+    "burner_on",
+    "burner_active",
+    "burneron"
+}
+
+
+BURNER_OFF_CLASSES = {
+    "burner_off",
+    "burneroff"
+}
+
+
+# ============================================================
+# LED CONTROL
+# ============================================================
+
+def set_alert(active):
+
+    if active:
+
+        bridge.call(
+            "set_alert",
+            1
         )
 
-        cloth_detections = self._get_boxes(
-            results.get("cloth", {})
+    else:
+
+        bridge.call(
+            "set_alert",
+            0
         )
 
-        kitchen_detections = self._get_boxes(
-            results.get("kitchen", {})
-        )
 
-        # -----------------------------------------
-        # BURNER MODEL
-        # -----------------------------------------
+# ============================================================
+# RULE ENGINE
+# ============================================================
 
-        burner_on = any(
-            self._label(box) == "1"
-            and self._confidence(box) >= self.CONFIDENCE_THRESHOLD
-            for box in burner_detections
-        )
+def evaluate_rules(
+    flame,
+    burner,
+    cloth
+):
 
-        burner_off = any(
-            self._label(box) == "0"
-            and self._confidence(box) >= self.CONFIDENCE_THRESHOLD
-            for box in burner_detections
-        )
+    # --------------------------------------------------------
+    # RULE 1:
+    # FLAME + CLOTH
+    # --------------------------------------------------------
 
-        # -----------------------------------------
-        # CLOTH MODEL
-        # -----------------------------------------
-
-        cloth_detected = any(
-            self._confidence(box) >= self.CONFIDENCE_THRESHOLD
-            for box in cloth_detections
-        )
-
-        # -----------------------------------------
-        # KITCHEN MODEL
-        # -----------------------------------------
-
-        flame_detected = self._has_kitchen_class(
-            kitchen_detections, "0"
-        )
-
-        smoke_detected = self._has_kitchen_class(
-            kitchen_detections, "1"
-        )
-
-        kitchen_burner_detected = self._has_kitchen_class(
-            kitchen_detections, "2"
-        )
-
-        spill_detected = self._has_kitchen_class(
-            kitchen_detections, "3"
-        )
-
-        safe_detected = self._has_kitchen_class(
-            kitchen_detections, "4"
-        )
-
-        # -----------------------------------------
-        # SAFETY DECISION
-        # -----------------------------------------
-
-        state = "SAFE"
-        reason = "No kitchen hazard detected."
-
-        if flame_detected or smoke_detected:
-            state = "DANGER"
-
-            reasons = []
-
-            if flame_detected:
-                reasons.append("Flame detected")
-
-            if smoke_detected:
-                reasons.append("Smoke detected")
-
-            reason = " + ".join(reasons)
-
-        elif burner_on and cloth_detected:
-            state = "DANGER"
-            reason = "Cloth detected while burner is ON."
-
-        elif spill_detected:
-            state = "WARNING"
-            reason = "Spill detected."
-
-        elif burner_on:
-            state = "WARNING"
-            reason = "Burner is ON."
-
-        elif cloth_detected:
-            state = "WARNING"
-            reason = "Cloth detected."
+    if flame and cloth:
 
         return {
-            "state": state,
-            "reason": reason,
-            "detections": {
-                "burner_on": burner_on,
-                "burner_off": burner_off,
-                "cloth": cloth_detected,
-                "flame": flame_detected,
-                "smoke": smoke_detected,
-                "kitchen_burner": kitchen_burner_detected,
-                "spill": spill_detected,
-                "safe": safe_detected,
-            },
+            "hazard": "FIRE HAZARD",
+            "message": "Flame and cloth detected",
+            "alert": True
         }
 
-    # -----------------------------------------
-    # Helper functions
-    # -----------------------------------------
 
-    def _get_boxes(self, result):
-        """Extract bounding boxes from an Edge Impulse result."""
+    # --------------------------------------------------------
+    # RULE 2:
+    # FLAME ONLY
+    # --------------------------------------------------------
 
-        if not result:
-            return []
+    if flame:
 
-        return result.get("result", {}).get("bounding_boxes", [])
+        return {
+            "hazard": "FLAME DETECTED",
+            "message": "Flame detected",
+            "alert": False
+        }
 
-    def _label(self, box):
-        """Get the class label from a bounding box."""
 
-        return str(
-            box.get(
-                "label",
-                box.get("class_name", "")
+    # --------------------------------------------------------
+    # RULE 3:
+    # BURNER ON
+    # --------------------------------------------------------
+
+    if burner:
+
+        return {
+            "hazard": "BURNER ACTIVE",
+            "message": "Burner is ON",
+            "alert": False
+        }
+
+
+    # --------------------------------------------------------
+    # RULE 4:
+    # CLOTH ONLY
+    # --------------------------------------------------------
+
+    if cloth:
+
+        return {
+            "hazard": "CLOTH DETECTED",
+            "message": "Cloth detected",
+            "alert": False
+        }
+
+
+    # --------------------------------------------------------
+    # RULE 5:
+    # SAFE
+    # --------------------------------------------------------
+
+    return {
+        "hazard": "SAFE",
+        "message": "Kitchen condition normal",
+        "alert": False
+    }
+
+
+# ============================================================
+# PROCESS AI DETECTIONS
+# ============================================================
+
+def process_detections(detections):
+
+    flame = False
+    burner = False
+    cloth = False
+
+    output_detections = []
+
+
+    # ========================================================
+    # READ DETECTIONS
+    # ========================================================
+
+    for class_name, values in detections.items():
+
+        if isinstance(values, dict):
+
+            values = [values]
+
+
+        name = (
+            str(class_name)
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+
+
+        for value in values:
+
+            confidence = float(
+                value.get(
+                    "confidence",
+                    0.0
+                )
             )
-        )
 
-    def _confidence(self, box):
-        """Get confidence score from a bounding box."""
 
-        return float(
-            box.get(
-                "value",
-                box.get("confidence", 0.0)
+            # Ignore weak detections
+
+            if confidence < 0.30:
+                continue
+
+
+            box = value.get(
+                "bounding_box_xyxy"
             )
-        )
 
-    def _has_kitchen_class(self, boxes, class_id):
-        """Check whether a Kitchen model class is detected."""
+            if box is None:
 
-        return any(
-            self._label(box) == class_id
-            and self._confidence(box) >= self.CONFIDENCE_THRESHOLD
-            for box in boxes
-        )
+                box = value.get(
+                    "bounding_box"
+                )
+
+
+            # ------------------------------------------------
+            # SAVE DETECTION
+            # ------------------------------------------------
+
+            output_detections.append({
+
+                "class_name":
+                    str(class_name),
+
+                "confidence":
+                    round(
+                        confidence,
+                        3
+                    ),
+
+                "bounding_box":
+                    box
+            })
+
+
+            # =================================================
+            # FLAME
+            # =================================================
+
+            if name in FLAME_CLASSES:
+
+                flame = True
+
+
+            # =================================================
+            # CLOTH
+            # =================================================
+
+            elif name in CLOTH_CLASSES:
+
+                cloth = True
+
+
+            # =================================================
+            # BURNER ON
+            # =================================================
+
+            elif name in BURNER_ON_CLASSES:
+
+                burner = True
+
+
+            # =================================================
+            # BURNER OFF
+            # =================================================
+
+            elif name in BURNER_OFF_CLASSES:
+
+                burner = False
+
+
+    # ========================================================
+    # APPLY RULE ENGINE
+    # ========================================================
+
+    result = evaluate_rules(
+        flame,
+        burner,
+        cloth
+    )
+
+
+    # ========================================================
+    # CONTROL LED
+    # ========================================================
+
+    set_alert(
+        result["alert"]
+    )
+
+
+    # ========================================================
+    # WEB UI
+    # ========================================================
+
+    ui.send_message(
+
+        "detection",
+
+        message={
+
+            "detections":
+                output_detections,
+
+            "hazard":
+                result["hazard"],
+
+            "message":
+                result["message"],
+
+            "flame":
+                flame,
+
+            "burner_on":
+                burner,
+
+            "cloth":
+                cloth,
+
+            "alert":
+                result["alert"]
+        }
+    )
+
+
+# ============================================================
+# REGISTER CALLBACK
+# ============================================================
+
+detector.on_detect_all(
+    process_detections
+)
+
+
+# ============================================================
+# START APPLICATION
+# ============================================================
+
+App.run()
